@@ -39,7 +39,15 @@ DESC NOTIFICATION INTEGRATION AWSSNSTOPIC; -- Collect property values: SF_AWS_IA
 
  /* Step 3: Use the Stored Procedure SEND_SNOWFLAKE_NOTIFICATION to send your notification to the AWS SNS topic previously created
   */  
--- These are illustrative examples
+
+-- You will need a warehouse for the steps below
+create or replace warehouse DEMO_ALERTS_WH with 
+	warehouse_size = 'XSMALL' 
+  warehouse_type = 'STANDARD'
+  auto_resume = true 
+  auto_suspend = 600;   
+
+-- A few examples of how to send a notification
 call SYSTEM$SEND_SNOWFLAKE_NOTIFICATION(
   '{ "text/html": "<p>A notification</p>" }', 
   SNOWFLAKE.NOTIFICATION.INTEGRATION('AWSSNSTOPIC'));
@@ -56,4 +64,47 @@ call SYSTEM$SEND_SNOWFLAKE_NOTIFICATION(SNOWFLAKE.NOTIFICATION.APPLICATION_JSON(
 call SYSTEM$SEND_SNOWFLAKE_NOTIFICATION('{ "text/plain": "Plain text notification" }', 
   SNOWFLAKE.NOTIFICATION.INTEGRATION('AWSSNSTOPIC'));
 
+ /* Step 4: Use Snowflake Alerts to trigger a notification based on a condition.
+  * The condition will be based on values stored in a Snowflake table.
+  */   
 
+-- Start by creating a database, schema and a sample table
+create or replace database DEMO_ALERTS;
+create or replace schema DEV;
+create or replace table MONITORED_VALUES (
+  id INTEGER,
+  value INTEGER,
+  record_timestamp TIMESTAMP
+);
+
+-- Create the alert referencing the condition to be satisfied (based on values in a table)
+--   and the action to be executed once the condition is met.
+CREATE OR REPLACE ALERT MONITORED_ALERT
+  WAREHOUSE = DEMO_ALERTS_WH
+  SCHEDULE = '1 minute'
+  IF( EXISTS(
+    SELECT ID FROM MONITORED_VALUES WHERE value>100
+      AND record_timestamp BETWEEN SNOWFLAKE.ALERT.LAST_SUCCESSFUL_SCHEDULED_TIME()
+       AND SNOWFLAKE.ALERT.SCHEDULED_TIME())) 
+  THEN
+    call SYSTEM$SEND_SNOWFLAKE_NOTIFICATION(
+      '{ "text/plain": "Monitored values over 100" }', 
+      SNOWFLAKE.NOTIFICATION.INTEGRATION('AWSSNSTOPIC'));
+
+-- When alerts are created, they are suspended. You need to resume then manually.
+ALTER ALERT MONITORED_ALERT RESUME;
+
+-- Here's how to check alert executions
+SELECT *
+FROM
+  TABLE(INFORMATION_SCHEMA.ALERT_HISTORY(
+    SCHEDULED_TIME_RANGE_START
+      =>dateadd('hour',-1,current_timestamp()))) -- within the last hour
+ORDER BY SCHEDULED_TIME DESC;
+
+-- Now insert data into the table that will trigger the alert
+insert into MONITORED_VALUES values (1, 1);
+insert into MONITORED_VALUES values (2, 101);
+
+-- Check the alert execution history again. Query will return one row per minute, as per the alert schedule.
+-- The column 'STATE' will show whether the condition was not met or if the alert was triggered. 
